@@ -4,6 +4,8 @@
 
 #include "Model.h"
 
+static double lasterror = std::numeric_limits<double>::infinity();
+
 struct ReLU {
     static double app(double n) { return std::max(0.0, n); }
     static double dir(double n) { return n >= 0; }
@@ -29,7 +31,7 @@ int32_t swapByte(int32_t n) {
 }
 
 constexpr std::array layerSizes = {28 * 28, 800, 10};
-using ModelType = Model<LRELU, layerSizes.size(), layerSizes>;
+using ModelType = Model<LRELU, layerSizes.size(), layerSizes,true>;
 
 struct openFiles{
     std::ifstream imageFile;
@@ -115,27 +117,27 @@ void runTest(const ModelType &model, const std::string &imageFileName, const std
             correctNum++;
             continue;
         }
-        for (long i = 0; i < output.rows(); i++) {
-            std::cout << i << ": " << output(i) << "\n";
-        }
-        std::cout << "Highest: " << mi << " Correct: " << ((int)readChar) << '\n';
-        for (std::size_t i = 0; i < imageDim; i++) {
-            if (i % cols == 0) {
-                std::cout << '\n';
-            }
-            if (imageBuffer[i] <= 52) {
-                std::cout << "█";
-            } else if (imageBuffer[i] <= 102) {
-                std::cout << "▓";
-            } else if (imageBuffer[i] <= 154) {
-                std::cout << "▒";
-            } else if (imageBuffer[i] <= 205) {
-                std::cout << "░";
-            } else {
-                std::cout << " ";
-            }
-        }
-        std::cout << "\n\n";
+        // for (long i = 0; i < output.rows(); i++) {
+        //     std::cout << i << ": " << output(i) << "\n";
+        // }
+        // std::cout << "Highest: " << mi << " Correct: " << ((int)readChar) << '\n';
+        // for (std::size_t i = 0; i < imageDim; i++) {
+        //     if (i % cols == 0) {
+        //         std::cout << '\n';
+        //     }
+        //     if (imageBuffer[i] <= 52) {
+        //         std::cout << "█";
+        //     } else if (imageBuffer[i] <= 102) {
+        //         std::cout << "▓";
+        //     } else if (imageBuffer[i] <= 154) {
+        //         std::cout << "▒";
+        //     } else if (imageBuffer[i] <= 205) {
+        //         std::cout << "░";
+        //     } else {
+        //         std::cout << " ";
+        //     }
+        // }
+        // std::cout << "\n\n";
     }
     std::cout << correctNum << " correctly identifed " << (numTimes-correctNum) << " incorrectly identied " << numTimes << " total\n";
     std::cout << 100.0*correctNum/numTimes << "% correct\n";
@@ -143,12 +145,12 @@ void runTest(const ModelType &model, const std::string &imageFileName, const std
     labelFile.close();
 }
 
-void runTraining(ModelType &model, const std::string &imageFileName, const std::string &labelFileName) {
+void runTraining(ModelType &model, const std::string &imageFileName, const std::string &labelFileName, uint64_t numTimes) {
     auto info = setUpFiles(imageFileName, labelFileName);
     std::ifstream imageFile = std::move(info.imageFile);
     std::ifstream labelFile = std::move(info.labelFile);
-    uint64_t numTimes = info.numTimes;
-    if(numTimes!=60000){
+    uint64_t numData = info.numTimes;
+    if(numData!=60000){
         std::cout << "wrong number of elements\n";
         exit(1);
     }
@@ -162,32 +164,48 @@ void runTraining(ModelType &model, const std::string &imageFileName, const std::
         answerChoices[i][i] = 1.0;
     }
     unsigned char imageBuffer[imageDim];
-    double totalError = 0;
-    for (uint64_t i = 1; i <= numTimes; i++) {
+    std::vector<Eigen::VectorXd> inputs;
+    std::vector<char> labeles;
+    for (uint64_t i = 0; i < numData; i++) {
         imageFile.read(reinterpret_cast<char *>(imageBuffer), imageDim);
         labelFile.read(reinterpret_cast<char *>(&readChar), 1);
-        Eigen::VectorXd input = Eigen::Map<Eigen::Matrix<unsigned char, -1, 1>>(imageBuffer, imageDim, 1).cast<double>()/255.0;
-        totalError += model.trainModel<true>(std::move(input), answerChoices[readChar]);
+        labeles.push_back(readChar);
+        inputs.push_back(Eigen::Map<Eigen::Matrix<unsigned char, -1, 1>>(imageBuffer, imageDim, 1).cast<double>()/255.0);
     }
-    if (std::isnan(totalError)) {
-        std::cout << "we got a NaN\n";
-        exit(1);
-    }
-    std::cout << "Error at " << totalError / numTimes << "\n";
     imageFile.close();
     labelFile.close();
+    for(uint64_t i2 = 0; i2 < numTimes; i2++){
+        double totalError = 0;
+        for(uint64_t i = 0; i < numData; i++){
+            totalError += model.trainModel<true>(inputs[i], answerChoices[labeles[i]]);
+            if(i%10000==0){
+                model.applyTraining();
+            }
+        }
+        if (std::isnan(totalError)) {
+            std::cout << "we got a NaN\n";
+            exit(1);
+        }
+        model.applyTraining();
+        std::cout << totalError / numData << ",";
+        if(lasterror<totalError){
+            std::cout << '\n';
+            model.divideLearningRate();
+        } else {
+            lasterror = totalError;
+        }
+        model.writeTo("weights");
+    }
+    std::cout << '\n';
 }
 
 int main() {
     srand((unsigned int)time(0));
+    // rand();
     ModelType model("weights");
-
-    // for (std::size_t i = 0; i < 100000; i++) {
-    //     std::cout << "Pass " << i << '\n';
-    //     runTraining(model, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
-    //     model.applyTraining();
-    //     model.writeTo("weights");
-    // }
-    runTest(model, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
-    // model.writeTo("weights");
+    for(int i = 0; i < 1000; i++){
+        runTest(model, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+        runTraining(model, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte",4);
+    }
+    model.writeTo("weights");
 }
