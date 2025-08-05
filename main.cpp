@@ -1,37 +1,61 @@
-#include <bit>
+#include <cstddef>
 #include <fstream>
 #include <iostream>
-
+#include <type_traits>
 #include "Model.h"
 
-static double lasterror = std::numeric_limits<double>::infinity();
-
+template<class T>
+concept FloatingPoint = std::is_floating_point_v<T>;
 struct ReLU {
-    static double app(double n) { return std::max(0.0, n); }
-    static double dir(double n) { return n >= 0; }
+    template<FloatingPoint T>
+    static constexpr T app(T n) noexcept { return std::max<T>(0, n); }
+    template<FloatingPoint T>
+    static constexpr T dir(T n) noexcept { return n > 0 ? 1 : 0; }
+    template<FloatingPoint T>
+    static constexpr std::complex<T> app(std::complex<T> n){
+        return std::complex<T>(app(n.real()),app(n.imag()));
+    }
+    template<FloatingPoint T>
+    static constexpr std::complex<T> dir(std::complex<T> n){
+        return std::complex<T>(dir(n.real()),dir(n.imag()));
+    }
 };
-struct LRELU {
-    static double app(double n) {
+struct LReLU {
+    template<FloatingPoint T>
+    static constexpr T app(T n) noexcept {
         if (n >= 0) {
             return n;
         }
         return n * leakRate;
     }
-    static double dir(double n) {
-        if (n >= 0) {
+    template<FloatingPoint T>
+    static constexpr T dir(T n) noexcept{
+        if (n > 0) {
             return 1;
         } else
             return leakRate;
     }
+    template<FloatingPoint T>
+    static constexpr std::complex<T> app(std::complex<T> n){
+        return std::complex<T>(app(n.real()),app(n.imag()));
+    }
+    template<FloatingPoint T>
+    static constexpr std::complex<T> dir(std::complex<T> n){
+        return std::complex<T>(dir(n.real()),dir(n.imag()));
+    }
     static constexpr double leakRate = 0.01;
 };
 
-int32_t swapByte(int32_t n) {
+constexpr int32_t swapByte(int32_t n) noexcept {
     return (n << 24) + (n >> 24) + ((n << 8) & 0xFF0000) + ((n >> 8) & 0xFF00);
 }
 
-constexpr std::array layerSizes = {28 * 28, 800, 10};
-using ModelType = Model<LRELU, layerSizes.size(), layerSizes,true>;
+
+constexpr std::array layerSizes = {25,15, 10};
+using ModelType = Model<float,LReLU, 28 * 28, layerSizes,true>;
+using FloatType = ModelType::FloatType;
+using VectorT = ModelType::VectorT;
+using MatrixT = ModelType::MatrixT;
 
 struct openFiles{
     std::ifstream imageFile;
@@ -90,122 +114,202 @@ openFiles setUpFiles(const std::string &imageFileName, const std::string &labelF
     return ret;
 }
 
-void runTest(const ModelType &model, const std::string &imageFileName, const std::string &labelFileName) {
-    auto info = setUpFiles(imageFileName, labelFileName);
-    std::ifstream imageFile = std::move(info.imageFile);
-    std::ifstream labelFile = std::move(info.labelFile);
-    uint64_t numTimes = info.numTimes;
-    constexpr int rows = 28;
-    constexpr int cols = 28;
-    constexpr int imageDim = rows * cols;
-    unsigned char readChar;
-    unsigned char imageBuffer[imageDim];
+void runTest(const ModelType &model, const std::vector<MatrixT>& inputs, const std::vector<MatrixT>& outputs, bool printFailures) {
+    assert(inputs.size()==outputs.size());
     uint64_t correctNum = 0;
-    for (uint64_t i = 1; i <= numTimes; i++) {
-        imageFile.read(reinterpret_cast<char *>(imageBuffer), imageDim);
-        Eigen::VectorXd input = Eigen::Map<Eigen::Matrix<unsigned char, -1, 1>>(imageBuffer, imageDim, 1).cast<double>()/255.0;
-        labelFile.read(reinterpret_cast<char *>(&readChar), 1);
-        auto output = model.runModel(std::move(input));
-        
-        std::size_t mi = 0;
-        for (long i = 0; i < output.rows(); i++) {
-            if (output(i) > output(mi)) {
-                mi = i;
+    double totalError = 0;
+    std::size_t totalNum = 0;
+    for (uint64_t cinput = 0; cinput < inputs.size(); cinput++) {
+        const auto& input = inputs[cinput];
+        const auto& output = outputs[cinput];
+        assert(input.rows()==28*28);
+        totalNum+=input.cols();
+        auto answer = model.runModel(input);
+        assert(input.cols()==output.cols());
+        assert(input.cols()==answer.cols());
+        assert(answer.rows()==output.rows());
+        totalError+=(answer-output).squaredNorm();
+        static constexpr FloatType one = FloatType(1);
+        for(long cCol = 0; cCol < output.cols(); cCol++){
+            std::size_t givenAnswer = 0;
+            std::size_t trueAnswer = 0;
+            const auto outputCol = output.col(cCol);
+            const auto answerCol = answer.col(cCol);
+            for(long i = 1; i < outputCol.rows(); i++){
+                if (std::abs(one-answerCol(i)) < std::abs(one-answerCol(givenAnswer))) {
+                    givenAnswer = i;
+                }
+                if (std::abs(one-outputCol(i)) < std::abs(one-outputCol(trueAnswer))) {
+                    trueAnswer = i;
+                }
             }
+            if(trueAnswer==givenAnswer){
+                correctNum++;
+                continue;
+            }
+            if(!printFailures){
+                continue;
+            }
+            std::cout << answerCol(0);
+            for (long i = 1; i < answerCol.rows(); i++) {
+                std::cout << "," << answerCol(i);
+            }
+            std::cout << '\n';
+            std::cout << "Highest: " << givenAnswer << " Correct: " << trueAnswer << '\n';
+            for (std::size_t i = 0; i < 28*28; i++) {
+                if (i % 28 == 0) {
+                    std::cout << '\n';
+                }
+                auto cVal = input(i,cCol)*255;
+                if (cVal <= 52) {
+                    std::cout << "█";
+                } else if (cVal <= 102) {
+                    std::cout << "▓";
+                } else if (cVal <= 154) {
+                    std::cout << "▒";
+                } else if (cVal <= 205) {
+                    std::cout << "░";
+                } else {
+                    std::cout << " ";
+                }
+            }
+            std::cout << "\n\n";
         }
-        if(mi==readChar){
-            correctNum++;
-            continue;
-        }
-        // for (long i = 0; i < output.rows(); i++) {
-        //     std::cout << i << ": " << output(i) << "\n";
-        // }
-        // std::cout << "Highest: " << mi << " Correct: " << ((int)readChar) << '\n';
-        // for (std::size_t i = 0; i < imageDim; i++) {
-        //     if (i % cols == 0) {
-        //         std::cout << '\n';
-        //     }
-        //     if (imageBuffer[i] <= 52) {
-        //         std::cout << "█";
-        //     } else if (imageBuffer[i] <= 102) {
-        //         std::cout << "▓";
-        //     } else if (imageBuffer[i] <= 154) {
-        //         std::cout << "▒";
-        //     } else if (imageBuffer[i] <= 205) {
-        //         std::cout << "░";
-        //     } else {
-        //         std::cout << " ";
-        //     }
-        // }
-        // std::cout << "\n\n";
     }
-    std::cout << correctNum << " correctly identifed " << (numTimes-correctNum) << " incorrectly identied " << numTimes << " total\n";
-    std::cout << 100.0*correctNum/numTimes << "% correct\n";
-    imageFile.close();
-    labelFile.close();
+    std::cout << correctNum << " correctly identifed " << (totalNum-correctNum) << " incorrectly identied " << totalNum << " total\n";
+    std::cout << 100.0*correctNum/totalNum << "% correct\n";
+    std::cout << totalError/totalNum << " average error\n";
 }
 
-void runTraining(ModelType &model, const std::string &imageFileName, const std::string &labelFileName, uint64_t numTimes) {
-    auto info = setUpFiles(imageFileName, labelFileName);
+std::size_t loadData(const std::string &imageFileName, const std::string &labelFileName, std::vector<MatrixT>& inputs, std::vector<MatrixT>& outputs){
+auto info = setUpFiles(imageFileName, labelFileName);
     std::ifstream imageFile = std::move(info.imageFile);
     std::ifstream labelFile = std::move(info.labelFile);
     uint64_t numData = info.numTimes;
-    if(numData!=60000){
-        std::cout << "wrong number of elements\n";
-        exit(1);
-    }
+    constexpr std::size_t perGroup = 512;
+    // if(numData!=60000){
+    //     std::cout << "wrong number of elements\n";
+    //     exit(1);
+    // }
     constexpr int rows = 28;
     constexpr int cols = 28;
     constexpr int imageDim = rows * cols;
-    unsigned char readChar;
-    std::array<std::array<double, 10>, 10> answerChoices;
+    std::array<VectorT, 10> answerChoices;
     for (std::size_t i = 0; i < answerChoices.size(); i++) {
-        answerChoices[i].fill(0);
+        answerChoices[i] = VectorT::Constant(answerChoices.size(),0);
         answerChoices[i][i] = 1.0;
     }
-    unsigned char imageBuffer[imageDim];
-    std::vector<Eigen::VectorXd> inputs;
-    std::vector<char> labeles;
+    std::array<unsigned char,imageDim> imageBuffer;
+    const std::size_t numGropus = (numData-1+perGroup)/perGroup;
+    inputs.resize(numGropus);
+    outputs.resize(numGropus);
+    std::size_t rem = numData;
+    for(auto& input : inputs){
+        input.resize(imageDim,std::min(rem,perGroup));
+        rem-=perGroup;
+    }
+    rem = numData;
+    for(auto& output : outputs){
+        output.resize(answerChoices.size(),std::min(rem,perGroup));
+        rem-=perGroup;
+        output.fill(0);
+    }
     for (uint64_t i = 0; i < numData; i++) {
-        imageFile.read(reinterpret_cast<char *>(imageBuffer), imageDim);
-        labelFile.read(reinterpret_cast<char *>(&readChar), 1);
-        labeles.push_back(readChar);
-        inputs.push_back(Eigen::Map<Eigen::Matrix<unsigned char, -1, 1>>(imageBuffer, imageDim, 1).cast<double>()/255.0);
+        imageFile.read(reinterpret_cast<char*>(imageBuffer.data()), imageDim);
+        inputs[i/perGroup].col(i%perGroup) = Eigen::Map<Eigen::Matrix<unsigned char,-1,1>>(imageBuffer.data(), imageDim, 1).cast<FloatType>()/255.0;
+        outputs[i/perGroup](labelFile.get(),i%perGroup) = 1.0;
     }
-    imageFile.close();
-    labelFile.close();
-    for(uint64_t i2 = 0; i2 < numTimes; i2++){
-        double totalError = 0;
-        for(uint64_t i = 0; i < numData; i++){
-            totalError += model.trainModel<true>(inputs[i], answerChoices[labeles[i]]);
-            if(i%10000==0){
-                model.applyTraining();
-            }
-        }
-        if (std::isnan(totalError)) {
-            std::cout << "we got a NaN\n";
-            exit(1);
-        }
-        model.applyTraining();
-        std::cout << totalError / numData << ",";
-        if(lasterror<totalError){
-            std::cout << '\n';
-            model.divideLearningRate();
-        } else {
-            lasterror = totalError;
-        }
-        model.writeTo("weights");
-    }
-    std::cout << '\n';
+    std::cout << "Data load done\n";
+    return numData;
 }
 
-int main() {
-    srand((unsigned int)time(0));
-    // rand();
-    ModelType model("weights");
-    for(int i = 0; i < 1000; i++){
-        runTest(model, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
-        runTraining(model, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte",4);
+void shuffle(std::vector<MatrixT>& inputs, std::vector<MatrixT>& outputs){
+    const std::size_t perGroup = inputs[0].cols();
+    const std::size_t total = (inputs.size()-1)*perGroup+inputs.back().cols();
+    for(std::size_t i = 0; i < total; i++){
+        const std::size_t i2 = rand()%(total-i)+i;
+        if(i2==i) continue;
+        inputs[i/perGroup].col(i%perGroup).swap(inputs[i2/perGroup].col(i2%perGroup));
+        outputs[i/perGroup].col(i%perGroup).swap(outputs[i2/perGroup].col(i2%perGroup));
+    }
+}
+
+double runTraining(ModelType &model, std::vector<MatrixT>& inputs, std::vector<MatrixT>& outputs, std::size_t totalTrainingExamples) {
+    shuffle(inputs,outputs);
+    double totalError = 0;
+    for(std::size_t i = 0; i < inputs.size(); i++){
+        totalError += model.trainModel(inputs[i],outputs[i]);
+        model.applyTraining();
+    }
+    if (std::isnan(totalError)) {
+        std::cout << "we got a NaN\n";
+        exit(1);
     }
     model.writeTo("weights");
+    return totalError / totalTrainingExamples;
+}
+
+int main(int argc, const char** argv) {
+    // Eigen::setNbThreads(12);
+    srand((unsigned int)time(0));
+    double learningRate = 1e-7;
+    if(argc>=2){
+        char* endPtr = nullptr;
+        learningRate = std::strtof(argv[1],&endPtr);
+        if(learningRate==0){
+            std::cout << "learning Rate input not understood\n";
+        }
+    }
+    std::cout << "learning rate: " << learningRate << '\n';
+    bool printFailures = false;
+    if(argc>=3){
+        if(argv[2][0]=='y'){
+            printFailures = true;
+        }
+    }
+    (void) printFailures;
+    ModelType model("weights");
+    model.setLearningRate(learningRate);
+    std::vector<MatrixT> inputs;
+    std::vector<MatrixT> outputs;
+    std::vector<MatrixT> testinputs;
+    std::vector<MatrixT> testoutputs;
+    bool increaseLearningRate = false;
+    constexpr double learningRateAdjust = 1.1;
+    const std::size_t totalTrainingExamples = loadData("data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte", inputs,outputs);
+    loadData("data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte", testinputs,testoutputs);
+    auto getNextLearningRate = [&increaseLearningRate,&learningRate](){
+        return increaseLearningRate ? learningRate*learningRateAdjust : learningRate/learningRateAdjust;
+    };
+    auto doTrain = [&model, &inputs, &outputs, totalTrainingExamples](std::size_t times){
+        for(std::size_t i = 0; i < times; i++){
+            runTraining(model,inputs,outputs,totalTrainingExamples);
+        }
+        return runTraining(model,inputs,outputs,totalTrainingExamples);
+    };
+    runTest(model,inputs, outputs,false);
+    runTest(model,testinputs,testoutputs,printFailures);
+    std::cout << "Error now: " << doTrain(0) << '\n';
+    double prevError = doTrain(20);
+    while(true){
+        std::cout << "Error now: " << prevError << '\n';
+        double nextError = doTrain(10);
+        const double eRatio1 = nextError/prevError;
+        prevError = nextError;
+        std::cout << "Error multiplied by: " << eRatio1 << '\n';
+        std::cout << "Error now: " << prevError << '\n';
+        model.setLearningRate(getNextLearningRate());
+        nextError = doTrain(10);
+        double eRatio2 = nextError/prevError;
+        prevError = nextError;
+        std::cout << "Error multiplied by: " << eRatio2 << '\n';
+        if(eRatio2>eRatio1){
+            increaseLearningRate = !increaseLearningRate;
+            model.setLearningRate(learningRate);
+        } else {
+            learningRate = getNextLearningRate();
+            std::cout << "learningRate is now " << learningRate << '\n';
+        }
+        runTest(model,testinputs,testoutputs,printFailures);
+    }
 }
