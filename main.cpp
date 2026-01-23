@@ -275,8 +275,8 @@ int main(int argc, const char** argv) {
     std::vector<MatrixT> testoutputs;
     bool increaseLearningRate = false;
     constexpr double learningRateAdjust = 1.1;
-    const std::size_t totalTrainingExamples = loadData("data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte", inputs,outputs);
-    loadData("data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte", testinputs,testoutputs);
+    const std::size_t totalTrainingExamples = loadData("../data/train-images-idx3-ubyte", "../data/train-labels-idx1-ubyte", inputs,outputs);
+    loadData("../data/t10k-images-idx3-ubyte", "../data/t10k-labels-idx1-ubyte", testinputs,testoutputs);
     auto getNextLearningRate = [&increaseLearningRate,&learningRate](){
         return increaseLearningRate ? learningRate*learningRateAdjust : learningRate/learningRateAdjust;
     };
