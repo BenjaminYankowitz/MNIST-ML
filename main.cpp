@@ -267,7 +267,6 @@ int main(int argc, const char** argv) {
             printFailures = true;
         }
     }
-    (void) printFailures;
     ModelType model("weights");
     model.setLearningRate(learningRate);
     std::vector<MatrixT> inputs;
